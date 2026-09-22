@@ -102,6 +102,7 @@ class StreamReader:
         "_eof_callbacks",
         "_eof_counter",
         "_on_chunk_received",
+        "_on_chunk_received_tasks",
         "total_bytes",
         "total_compressed_bytes",
     )
@@ -138,6 +139,11 @@ class StreamReader:
         self._on_chunk_received: (
             Callable[[bytes], Coroutine[None, None, None]] | None
         ) = None
+        # Strong references for the fire-and-forget tasks read_nowait() schedules
+        # to run the (async) _on_chunk_received hook from sync code; the event
+        # loop only holds a weak reference to tasks, so without this a task can
+        # be GC'd mid-run. Each task removes itself once done.
+        self._on_chunk_received_tasks: set[asyncio.Task[None]] = set()
         self.total_bytes = 0
         self.total_compressed_bytes: int | None = None
 
@@ -536,9 +542,12 @@ class StreamReader:
         chunk = self._read_nowait(n)
         if chunk and (cb := self._on_chunk_received) is not None:
             # read_nowait is sync but the hook is async; schedule it so the
-            # observability event still fires.
-            # TODO: Save and await this task.
-            asyncio.create_task(cb(chunk))  # type: ignore[unused-awaitable]
+            # observability event still fires. read_nowait() can't await it
+            # directly, so keep a strong reference until it completes -
+            # see _on_chunk_received_tasks in __init__.
+            task = asyncio.create_task(cb(chunk))
+            self._on_chunk_received_tasks.add(task)
+            task.add_done_callback(self._on_chunk_received_tasks.discard)
         return chunk
 
     def _read_nowait_chunk(self, n: int) -> bytes:

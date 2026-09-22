@@ -1296,6 +1296,22 @@ class TestStreamReaderChunkHook:
         await asyncio.sleep(0)
         assert seen == [b"abc"]
 
+    async def test_read_nowait_task_survives_gc(self) -> None:
+        # The task read_nowait() schedules for the hook isn't referenced by
+        # the caller, so it must be held strongly by the stream itself until
+        # done - otherwise a GC pass between the schedule and the next loop
+        # tick can collect it before the hook ever runs.
+        stream, seen = self._make_one()
+        stream.feed_data(b"abc")
+
+        assert stream.read_nowait() == b"abc"
+        assert len(stream._on_chunk_received_tasks) == 1
+        gc.collect()
+
+        await asyncio.sleep(0)
+        assert seen == [b"abc"]
+        assert stream._on_chunk_received_tasks == set()
+
     async def test_hook_exception_propagates(self) -> None:
         async def cb(chunk: bytes) -> None:
             raise RuntimeError("boom")
